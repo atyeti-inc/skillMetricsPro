@@ -272,6 +272,43 @@ describe("getUserAuthCredentialsByEmail", () => {
   });
 });
 
+describe("getUserAuthCredentialsById", () => {
+  beforeEach(() => {
+    queryLogs = [];
+  });
+
+  it("returns credentials object that redacts password on JSON.stringify and util.inspect", async () => {
+    mockQueryResponse = {
+      rows: [
+        {
+          id: 42,
+          email: "auth_id_user@atyeti.com",
+          username: "auth_id_user",
+          is_admin: true,
+          password: "scrypt_password_hash_secret_by_id",
+          created_at: new Date(),
+        },
+      ],
+      rowCount: 1,
+    };
+
+    const creds = await storage.getUserAuthCredentialsById(42);
+    expect(creds).toBeDefined();
+    expect(creds!.id).toBe(42);
+    expect(creds!.password).toBe("scrypt_password_hash_secret_by_id");
+
+    // JSON.stringify redaction
+    const jsonStr = JSON.stringify(creds);
+    expect(jsonStr).toContain('"password":"[REDACTED]"');
+    expect(jsonStr).not.toContain("scrypt_password_hash_secret_by_id");
+
+    // util.inspect redaction
+    const inspected = util.inspect(creds);
+    expect(inspected).toContain("[REDACTED]");
+    expect(inspected).not.toContain("scrypt_password_hash_secret_by_id");
+  });
+});
+
 describe("updateUserPassword", () => {
   beforeEach(() => {
     queryLogs = [];
