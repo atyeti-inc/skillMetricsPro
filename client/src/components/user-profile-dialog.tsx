@@ -75,7 +75,7 @@ export default function UserProfileDialog({ userId, isOpen, onClose }: UserProfi
   }, [isOpen]);
 
   // Get user details
-  const { data: user, isLoading: isLoadingUser } = useQuery<Omit<User, 'password'>>({
+  const { data: user, isLoading: isLoadingUser } = useQuery<User>({
     queryKey: [`/api/users/${userId}`],
     enabled: !!userId && isOpen
   });

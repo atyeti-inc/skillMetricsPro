@@ -313,7 +313,7 @@ export const insertEndorsementV2Schema = createInsertSchema(endorsementsV2)
   });
 
 // Export types
-export type User = typeof users.$inferSelect & {
+export type User = Omit<typeof users.$inferSelect, "password"> & {
   // Additional runtime properties that might be added during processing
   isAdmin?: boolean;
 };

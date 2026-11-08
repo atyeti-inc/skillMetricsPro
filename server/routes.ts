@@ -216,7 +216,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const directAdminCheck = await checkIsUserAdminDirectly(userId);
       
       console.log("Admin check details:");
-      console.log("- User:", req.user);
+      console.log("- User ID:", req.user?.id, "isAdmin:", req.user?.isAdmin);
       console.log("- Session check result:", sessionAdminCheck);
       console.log("- Direct DB check result:", directAdminCheck);
       console.log("- isAdmin value:", req.user?.isAdmin, "type:", typeof req.user?.isAdmin);
@@ -487,8 +487,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/user/profile", ensureAuth, async (req, res) => {
     try {
       const user = await storage.getUser(req.user!.id);
-      const { password, ...userWithoutPassword } = user!;
-      res.json(userWithoutPassword);
+      res.json(user);
     } catch (error) {
       res.status(500).json({ message: "Error fetching profile", error });
     }
@@ -509,9 +508,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "User not found" });
       }
       
-      // Remove sensitive information - only return basic profile data
-      const { password, ...userBasicInfo } = user;
-      res.json(userBasicInfo);
+      res.json(user);
     } catch (error) {
       res.status(500).json({ message: "Error fetching user profile", error });
     }
@@ -596,7 +593,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log("Admin status from database (raw):", dbValue);
       console.log("Admin status from database (type):", typeof dbValue);
       console.log("Admin status converted to boolean:", isAdmin);
-      console.log("User object from storage:", user);
+      console.log("User object fetched for ID:", user.id);
       console.log("User object is_admin property:", user.is_admin);
       
       // Track changes for history
@@ -628,11 +625,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.log("Update data with preserved admin flag:", updateData);
         
         const updatedUser = await storage.updateUser(userId, updateData);
-        const { password, ...userWithoutPassword } = updatedUser;
-        res.json(userWithoutPassword);
+        res.json(updatedUser);
       } else {
-        const { password, ...userWithoutPassword } = user;
-        res.json(userWithoutPassword);
+        res.json(user);
       }
     } catch (error) {
       res.status(500).json({ message: "Error updating profile", error });
@@ -1047,12 +1042,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         users = await storage.getAllUsers();
       }
       
-      // Remove passwords from response
-      const usersWithoutPasswords = users.map(user => {
-        const { password, ...userWithoutPassword } = user;
-        return userWithoutPassword;
-      });
-      res.json(usersWithoutPasswords);
+      res.json(users);
     } catch (error) {
       res.status(500).json({ message: "Error fetching users", error });
     }
@@ -1424,12 +1414,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/admin/users", ensureAdmin, async (req, res) => {
     try {
       const users = await storage.getAllUsers();
-      // Remove passwords from response
-      const usersWithoutPasswords = users.map(user => {
-        const { password, ...userWithoutPassword } = user;
-        return userWithoutPassword;
-      });
-      res.json(usersWithoutPasswords);
+      res.json(users);
     } catch (error) {
       res.status(500).json({ message: "Error fetching users", error });
     }
@@ -1439,13 +1424,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/admin/admins", ensureAdmin, async (req, res) => {
     try {
       const users = await storage.getAllUsers();
-      // Filter to only include admin users and remove passwords
-      const adminUsers = users
-        .filter(user => user.is_admin === true)
-        .map(user => {
-          const { password, ...userWithoutPassword } = user;
-          return userWithoutPassword;
-        });
+      const adminUsers = users.filter(user => user.is_admin === true);
       res.json(adminUsers);
     } catch (error) {
       res.status(500).json({ message: "Error fetching admin users", error });
@@ -1525,10 +1504,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`Updating admin status for user ${userId} to ${isAdmin}`);
       
       const updatedUser = await storage.updateUser(userId, updateData);
-      const { password, ...userWithoutPassword } = updatedUser;
       
       res.json({
-        ...userWithoutPassword,
+        ...updatedUser,
         message: `Admin status for ${user.email} ${isAdmin ? 'enabled' : 'disabled'} successfully`
       });
     } catch (error) {
@@ -2268,12 +2246,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const skills = await storage.getAllSkills();
       const skillHistories = await storage.getAllSkillHistories();
       
-      // Remove sensitive information from users
-      const usersWithoutPasswords = users.map(user => {
-        const { password, ...userWithoutPassword } = user;
-        return userWithoutPassword;
-      });
-      
       // Format data for export
       const exportData = {
         exportDate: new Date().toISOString(),
@@ -2283,7 +2255,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           email: req.user!.email
         },
         data: {
-          users: usersWithoutPasswords,
+          users,
           skills,
           skillHistories
         }
@@ -2299,7 +2271,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get certification report
   app.get("/api/admin/certification-report", ensureAdmin, async (req, res) => {
     try {
-      console.log("Running certification report for user:", req.user);
+      console.log("Running certification report for user ID:", req.user?.id);
       
       // Direct database query to get all certified skills with their related data (using user_skills)
       const queryText = `

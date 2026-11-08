@@ -2,25 +2,27 @@
  * Email Fallback Service
  * 
  * This module provides fallback mechanisms when the main email service is unavailable.
- * It logs detailed information that would normally be sent via email.
+ * It logs operational notifications without emitting credentials or plaintext passwords.
  */
 
-export function logRegistrationDetails(email: string, username: string, password: string): void {
+import { maskEmail } from "./utils";
+
+export function logRegistrationDetails(email: string, username: string): void {
   console.log(`
 ========== BACKUP: REGISTRATION DETAILS ==========
-Email: ${email}
+Email: ${maskEmail(email)}
 Username: ${username}
-Password: ${password}
+Status: Registration notification queued (credential delivery via secure channel)
 ===============================================
   `);
 }
 
-export function logPasswordResetDetails(email: string, username: string, temporaryPassword: string): void {
+export function logPasswordResetDetails(email: string, username: string): void {
   console.log(`
 ========== BACKUP: PASSWORD RESET DETAILS ==========
-Email: ${email}
+Email: ${maskEmail(email)}
 Username: ${username}
-Temporary Password: ${temporaryPassword}
+Status: Password reset notification queued (credential delivery via secure channel)
 ===============================================
   `);
 }

@@ -4,7 +4,7 @@ import axios from "axios";
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
-import { log } from "./utils";
+import { log, sanitizeLogObject } from "./utils";
 
 const app = express();
 app.use(express.json());
@@ -26,7 +26,7 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        logLine += ` :: ${JSON.stringify(sanitizeLogObject(capturedJsonResponse))}`;
       }
 
       if (logLine.length > 80) {
@@ -51,8 +51,8 @@ const createApiProxy = (app: express.Express) => {
       console.log(`----- SKILL API REQUEST -----`);
       console.log(`Method: ${req.method}`);
       console.log(`URL: ${javaBackendUrl}`);
-      console.log(`Headers: ${JSON.stringify(req.headers)}`);
-      console.log(`Body: ${JSON.stringify(req.body)}`);
+      console.log(`Headers: ${JSON.stringify(sanitizeLogObject(req.headers))}`);
+      console.log(`Body: ${JSON.stringify(sanitizeLogObject(req.body))}`);
       console.log(`----------------------------`);
     } else {
       console.log(`Proxying request to Java backend: ${req.method} ${javaBackendUrl}`);
@@ -66,7 +66,7 @@ const createApiProxy = (app: express.Express) => {
       let requestBody = req.body;
       if (isSkillUpdateRequest) {
         console.log(`Special handling for skill update request detected`);
-        console.log(`Original request body:`, JSON.stringify(req.body));
+        console.log(`Original request body:`, JSON.stringify(sanitizeLogObject(req.body)));
         
         // Make sure the skill update body is in the format expected by Java backend
         // Example transformation if needed:
@@ -77,7 +77,7 @@ const createApiProxy = (app: express.Express) => {
         //   // Add any other fields needed by Java backend
         // };
         
-        console.log(`Transformed request body:`, JSON.stringify(requestBody));
+        console.log(`Transformed request body:`, JSON.stringify(sanitizeLogObject(requestBody)));
       }
       
       // Create request options
@@ -102,7 +102,7 @@ const createApiProxy = (app: express.Express) => {
       if (isSkillEndpoint) {
         console.log(`----- SKILL API RESPONSE -----`);
         console.log(`Status: ${response.status}`);
-        console.log(`Headers: ${JSON.stringify(response.headers)}`);
+        console.log(`Headers: ${JSON.stringify(sanitizeLogObject(response.headers))}`);
         
         // Try to convert and log the response body if it's JSON
         try {
@@ -157,7 +157,7 @@ const createApiProxy = (app: express.Express) => {
         res.send(response.data);
       }
     } catch (error: any) {
-      console.error('Proxy error:', error);
+      console.error('Proxy error:', sanitizeLogObject(error));
       
       if (isSkillEndpoint) {
         console.error(`Stack trace for skill endpoint error:`, error.stack);
@@ -206,8 +206,8 @@ const isJavaBackendRunning = async (): Promise<boolean> => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
 
+    console.error("Internal Server Error:", sanitizeLogObject(err));
     res.status(status).json({ message });
-    throw err;
   });
 
   // Setup vite in development or serve static files in production

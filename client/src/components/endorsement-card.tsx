@@ -13,7 +13,7 @@ import { useAuth } from "@/hooks/use-auth";
 
 interface EndorsementCardProps {
   endorsement: Endorsement;
-  endorser: Omit<User, 'password'>;
+  endorser: User;
   showSkillName?: boolean;
   skillName?: string;
 }

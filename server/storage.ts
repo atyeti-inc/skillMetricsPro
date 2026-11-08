@@ -20,8 +20,11 @@ import {
   SkillCategory, InsertSkillCategory,
   SkillSubcategory, InsertSkillSubcategory,
   SkillApprover, InsertSkillApprover,
-  ReportSettings, InsertReportSettings
+  ReportSettings, InsertReportSettings,
+  users
 } from "@shared/schema";
+import { getTableColumns } from "drizzle-orm";
+import util from "util";
 import session from "express-session";
 import { Store } from "express-session";
 import createMemoryStore from "memorystore";
@@ -31,6 +34,51 @@ import { sendSkillApprovedEmail, sendSkillRejectedEmail } from "./email"; // Imp
 
 const MemoryStore = createMemoryStore(session);
 const PostgresSessionStore = connectPg(session);
+
+// Server-internal type that includes credentials for authentication verification only
+export type UserWithCredentials = typeof users.$inferSelect & {
+  isAdmin?: boolean;
+};
+
+// Derived safe user columns excluding credentials to prevent SQL leakage
+export const SAFE_USER_COLUMNS = Object.values(getTableColumns(users))
+  .map(col => col.name)
+  .filter(name => name !== 'password')
+  .join(', ');
+
+export const SAFE_USER_COLUMNS_PREFIXED = Object.values(getTableColumns(users))
+  .map(col => `u.${col.name}`)
+  .filter(col => col !== 'u.password')
+  .join(', ');
+
+class SafeUserCredentials {
+  [key: string]: any;
+
+  constructor(data: any) {
+    Object.assign(this, data);
+  }
+
+  toJSON() {
+    const copy = { ...this };
+    if ("password" in copy) {
+      copy.password = "[REDACTED]";
+    }
+    return copy;
+  }
+
+  [util.inspect.custom]() {
+    const copy = { ...this };
+    if ("password" in copy) {
+      copy.password = "[REDACTED]";
+    }
+    return copy;
+  }
+}
+
+function attachCredentialRedaction(user: any): UserWithCredentials {
+  if (!user) return user;
+  return new SafeUserCredentials(user) as unknown as UserWithCredentials;
+}
 
 // Storage interface with all required CRUD operations
 export interface IStorage {
@@ -51,6 +99,8 @@ export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
+  getUserAuthCredentialsByEmail(email: string): Promise<UserWithCredentials | undefined>;
+  getUserAuthCredentialsById(id: number): Promise<UserWithCredentials | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: number, data: Partial<User>): Promise<User>;
   updateUserPassword(id: number, hashedPassword: string): Promise<void>;
@@ -341,7 +391,7 @@ export class PostgresStorage implements IStorage {
   // User operations
   async getUser(id: number): Promise<User | undefined> {
     try {
-      const result = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+      const result = await pool.query(`SELECT ${SAFE_USER_COLUMNS} FROM users WHERE id = $1`, [id]);
       if (!result.rows[0]) return undefined;
       return this.snakeToCamel(result.rows[0]);
     } catch (error) {
@@ -352,7 +402,7 @@ export class PostgresStorage implements IStorage {
 
   async getUserByUsername(username: string): Promise<User | undefined> {
     try {
-      const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+      const result = await pool.query(`SELECT ${SAFE_USER_COLUMNS} FROM users WHERE username = $1`, [username]);
       if (!result.rows[0]) return undefined;
       return this.snakeToCamel(result.rows[0]);
     } catch (error) {
@@ -363,19 +413,7 @@ export class PostgresStorage implements IStorage {
   
   async getUserByEmail(email: string): Promise<User | undefined> {
     try {
-      console.log(`getUserByEmail: Looking for email: "${email}"`);
-      // Check if there are any users in the database (for debugging)
-      const countResult = await pool.query('SELECT COUNT(*) FROM users');
-      console.log(`Total users in database: ${countResult.rows[0].count}`);
-      
-      // Log a few emails for comparison
-      const sampleEmails = await pool.query('SELECT id, email FROM users LIMIT 5');
-      console.log('Sample emails in database:', sampleEmails.rows);
-      
-      // Execute the actual query
-      const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-      console.log(`Query results for email "${email}":`, result.rows.length > 0 ? `Found user id: ${result.rows[0].id}` : 'No user found');
-      
+      const result = await pool.query(`SELECT ${SAFE_USER_COLUMNS} FROM users WHERE email = $1`, [email]);
       if (!result.rows[0]) return undefined;
       return this.snakeToCamel(result.rows[0]);
     } catch (error) {
@@ -384,15 +422,38 @@ export class PostgresStorage implements IStorage {
     }
   }
 
+  async getUserAuthCredentialsByEmail(email: string): Promise<UserWithCredentials | undefined> {
+    try {
+      const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+      if (!result.rows[0]) return undefined;
+      const user = this.snakeToCamel(result.rows[0]);
+      return attachCredentialRedaction(user);
+    } catch (error) {
+      console.error("Error getting user auth credentials by email:", error);
+      throw error;
+    }
+  }
+
+  async getUserAuthCredentialsById(id: number): Promise<UserWithCredentials | undefined> {
+    try {
+      const result = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+      if (!result.rows[0]) return undefined;
+      const user = this.snakeToCamel(result.rows[0]);
+      return attachCredentialRedaction(user);
+    } catch (error) {
+      console.error("Error getting user auth credentials by id:", error);
+      throw error;
+    }
+  }
+
   async createUser(insertUser: InsertUser & { username?: string, password?: string, firstName?: string, lastName?: string, project?: string, role?: string, location?: string }): Promise<User> {
     try {
-      console.log("Creating user with data:", insertUser);
       const result = await pool.query(
         `INSERT INTO users (
           email, is_admin, username, password, first_name, last_name, project, role, location
          ) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
-         RETURNING *`,
+         RETURNING ${SAFE_USER_COLUMNS}`,
         [
           insertUser.email, 
           insertUser.is_admin || false,
@@ -405,7 +466,6 @@ export class PostgresStorage implements IStorage {
           insertUser.location || ''
         ]
       );
-      console.log("User created:", result.rows[0]);
       return this.snakeToCamel(result.rows[0]);
     } catch (error) {
       console.error("Error creating user:", error);
@@ -415,12 +475,13 @@ export class PostgresStorage implements IStorage {
   
   async updateUser(id: number, data: Partial<User>): Promise<User> {
     try {
+      const { password: _, ...cleanData } = (data as any);
       const sets: string[] = [];
       const params: any[] = [];
       let paramIndex = 1;
       
       // Build SET clause and parameters
-      for (const [key, value] of Object.entries(data)) {
+      for (const [key, value] of Object.entries(cleanData)) {
         // Special case handling for isAdmin -> is_admin
         let columnName;
         if (key === 'isAdmin') {
@@ -429,7 +490,6 @@ export class PostgresStorage implements IStorage {
           // Convert camelCase to snake_case for database column names
           columnName = key.replace(/([A-Z])/g, '_$1').toLowerCase();
         }
-        console.log(`Converting property ${key} to column ${columnName} with value ${value}`);
         sets.push(`${columnName} = $${paramIndex}`);
         params.push(value);
         paramIndex++;
@@ -442,7 +502,7 @@ export class PostgresStorage implements IStorage {
       params.push(id); // Add id as the last parameter
       
       const result = await pool.query(
-        `UPDATE users SET ${sets.join(', ')} WHERE id = $${paramIndex} RETURNING *`,
+        `UPDATE users SET ${sets.join(', ')} WHERE id = $${paramIndex} RETURNING ${SAFE_USER_COLUMNS}`,
         params
       );
       
@@ -475,7 +535,7 @@ export class PostgresStorage implements IStorage {
   
   async getAllUsers(): Promise<User[]> {
     try {
-      const result = await pool.query('SELECT * FROM users ORDER BY id');
+      const result = await pool.query(`SELECT ${SAFE_USER_COLUMNS} FROM users ORDER BY id`);
       return this.snakeToCamel(result.rows);
     } catch (error) {
       console.error("Error getting all users:", error);
@@ -487,7 +547,7 @@ export class PostgresStorage implements IStorage {
     try {
       // Find users associated with projects under the given client
       const result = await pool.query(`
-        SELECT DISTINCT u.* 
+        SELECT DISTINCT ${SAFE_USER_COLUMNS_PREFIXED} 
         FROM users u
         JOIN project_resources pr ON u.id = pr.user_id
         JOIN projects p ON pr.project_id = p.id
@@ -506,7 +566,7 @@ export class PostgresStorage implements IStorage {
     try {
       // Find users who are resources on the given project
       const result = await pool.query(`
-        SELECT DISTINCT u.* 
+        SELECT DISTINCT ${SAFE_USER_COLUMNS_PREFIXED} 
         FROM users u
         JOIN project_resources pr ON u.id = pr.user_id
         WHERE pr.project_id = $1
@@ -2153,7 +2213,7 @@ export class PostgresStorage implements IStorage {
   async getAllAdmins(): Promise<User[]> {
     try {
       const result = await pool.query(
-        `SELECT * FROM users WHERE is_admin = true OR admin = true`
+        `SELECT ${SAFE_USER_COLUMNS} FROM users WHERE is_admin = true`
       );
       
       return this.snakeToCamel(result.rows);

@@ -7,6 +7,7 @@ import { promisify } from "util";
 import { storage } from "./storage";
 import { User as SelectUser, loginUserSchema, insertUserSchema } from "@shared/schema";
 import { pool } from "./db"; // Import pool for direct database access
+import { auditLog, sanitizeLogObject } from "./utils";
 
 declare global {
   namespace Express {
@@ -60,28 +61,17 @@ export function setupAuth(app: Express) {
       },
       async (req, email, password, done) => {
         try {
-          console.log(`Attempting login with email: ${email}`);
           if (!email) {
-            console.log('No email provided');
             return done(null, false, { message: 'Email is required' });
           }
           
-          // Find the user by email
-          console.log(`About to call storage.getUserByEmail with: ${email}`);
-          const user = await storage.getUserByEmail(email);
-          console.log('getUserByEmail result:', user ? 'User found' : 'User not found');
+          auditLog("AUTH_LOGIN_ATTEMPT", { domain: email.includes("@") ? email.split("@")[1] : "" });
           
-          if (user) {
-            console.log(`User found: ${user.email}, userId: ${user.id}, isAdmin: ${user.is_admin}`);
-            console.log('Complete user object:', JSON.stringify(user, null, 2));
-          } else {
-            console.log(`No user found with email: ${email}`);
-            return done(null, false, { message: 'Invalid credentials' });
-          }
+          // Find the user with credentials by email
+          const user = await storage.getUserAuthCredentialsByEmail(email);
           
-          // Check if the password is valid
-          if (!user.password) {
-            console.log(`User ${user.email} has no password set`);
+          if (!user || !user.password) {
+            auditLog("AUTH_LOGIN_FAILURE", { reason: "Invalid credentials" });
             return done(null, false, { message: 'Invalid credentials' });
           }
           
@@ -97,18 +87,19 @@ export function setupAuth(app: Express) {
               await comparePasswords(password, user.password) : true;
               
             if (!isValidPassword && !isDefaultPassword) {
-              console.log(`Invalid password for user: ${user.email}`);
+              auditLog("AUTH_LOGIN_FAILURE", { reason: "Invalid credentials" });
               return done(null, false, { message: 'Invalid credentials' });
             }
             
-            console.log(`Password validated successfully for user: ${user.email}`);
-            return done(null, user);
+            auditLog("AUTH_LOGIN_SUCCESS", { userId: user.id });
+            const { password: _, ...safeUser } = user;
+            return done(null, safeUser);
           } catch (err) {
-            console.error(`Password validation error for ${user.email}:`, err);
+            auditLog("AUTH_LOGIN_FAILURE", { reason: "Credential validation error" });
             return done(null, false, { message: 'Invalid credentials' });
           }
         } catch (error) {
-          console.error(`Login error: ${error}`);
+          auditLog("AUTH_LOGIN_FAILURE", { reason: "Internal error" });
           return done(error);
         }
       }
@@ -122,41 +113,27 @@ export function setupAuth(app: Express) {
       
       // If user not found, return error to clear the session
       if (!user) {
-        console.log(`Passport deserialize: User with ID ${id} not found`);
         return done(null, false);
       }
       
       // Directly check database for admin status
-      // Handle the user object with dynamically added properties safely
       const userObj = user as any;
-      
-      // DIRECT DB QUERY for admin status - most reliable method
       const result = await pool.query('SELECT is_admin FROM users WHERE id = $1', [id]);
       const dbValue = result.rows[0]?.is_admin;
-      
-      // Convert PostgreSQL boolean representations to true JS boolean
       const isAdminBoolean = dbValue === true || dbValue === 't' || dbValue === 'true';
       
-      console.log(`Direct DB admin check for ${userObj.email}: raw value = ${dbValue} (${typeof dbValue})`);
-      
-      // Make sure it's consistently available in both formats as a true boolean
       userObj.isAdmin = isAdminBoolean;
       userObj.is_admin = isAdminBoolean;
       
-      // Log the conversion for debugging
-      console.log(`Passport deserialize: Ensured admin status (${isAdminBoolean}) is available under both properties for user ${userObj.email}`);
-      
       return done(null, user);
     } catch (error) {
-      console.error("Error in passport deserialize:", error);
+      console.error("Error in passport deserialize:", sanitizeLogObject(error));
       return done(error);
     }
   });
 
   app.post("/api/register", async (req, res, next) => {
     try {
-      console.log("POST /api/register - Body:", req.body);
-      
       // For email-only registration, we only need an email
       if (!req.body.email) {
         return res.status(400).json({ message: "Email is required" });
@@ -175,31 +152,26 @@ export function setupAuth(app: Express) {
       // Check if the email already exists
       const existingEmail = await storage.getUserByEmail(req.body.email);
       if (existingEmail) {
-        console.log("POST /api/register - Email already exists:", req.body.email);
         return res.status(400).json({ message: "Email already exists" });
       }
 
       // Generate a secure temporary password (8 characters with at least 1 uppercase, 1 lowercase, 1 number, 1 special character)
-      // This ensures that even the temporary password meets security requirements
       const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
       const lower = 'abcdefghijklmnopqrstuvwxyz';
       const numbers = '0123456789';
       const special = '@$!%*?&';
       
-      // Get at least one character from each category
       const randomUpper = upper.charAt(Math.floor(Math.random() * upper.length));
       const randomLower = lower.charAt(Math.floor(Math.random() * lower.length));
       const randomNumber = numbers.charAt(Math.floor(Math.random() * numbers.length));
       const randomSpecial = special.charAt(Math.floor(Math.random() * special.length));
       
-      // Generate remaining random characters (4 more for a total of 8)
       const allChars = upper + lower + numbers + special;
       let remaining = '';
       for (let i = 0; i < 4; i++) {
         remaining += allChars.charAt(Math.floor(Math.random() * allChars.length));
       }
       
-      // Combine all parts and shuffle
       const shuffleArray = (arr: string[]) => {
         for (let i = arr.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
@@ -212,47 +184,38 @@ export function setupAuth(app: Express) {
         randomUpper, randomLower, randomNumber, randomSpecial, ...remaining.split('')
       ]).join('');
       
-      console.log(`Generated secure password for ${req.body.email}: ${generatedPassword}`);
-      
       // Hash the generated password
       const hashedPassword = await hashPassword(generatedPassword);
 
       // Create user with email and a username derived from email
       const userData = {
         email: req.body.email,
-        username: req.body.email.split('@')[0], // Use the part before @ as username
+        username: req.body.email.split('@')[0],
         password: hashedPassword,
         is_admin: req.body.is_admin || false,
       };
       
-      console.log("Creating user with data:", { ...userData, password: "[REDACTED]" });
       const user = await storage.createUser(userData);
-      console.log("POST /api/register - User created:", { ...user, password: "[REDACTED]" });
+      auditLog("AUTH_REGISTER_SUCCESS", { userId: user.id });
 
       // Send registration email
       try {
         const { sendRegistrationEmail } = await import('./email');
         await sendRegistrationEmail(user.email, user.username || 'User', generatedPassword);
       } catch (error) {
-        console.error('Failed to send registration email:', error);
+        console.error('Failed to send registration email:', sanitizeLogObject(error));
         // Use fallback mechanism for logging credentials
         const { logRegistrationDetails } = await import('./email-fallback');
-        logRegistrationDetails(user.email, user.username || 'User', generatedPassword);
+        logRegistrationDetails(user.email, user.username || 'User');
       }
 
-      // Skip automatic login after registration
-      console.log("POST /api/register - User created but not automatically logged in");
-      
-      // Remove password from response
-      const { password, ...userWithoutPassword } = user;
-      
       // Send registration success response
       res.status(201).json({ 
         message: "Registration successful. An email with login credentials has been sent to your email address.", 
-        user: userWithoutPassword 
+        user 
       });
     } catch (error) {
-      console.log("POST /api/register - Exception:", error);
+      console.error("POST /api/register - Exception:", sanitizeLogObject(error));
       next(error);
     }
   });
@@ -260,8 +223,6 @@ export function setupAuth(app: Express) {
   // Create a handler function for both endpoints
   const handleLogin = (req: Request, res: Response, next: Function) => {
     try {
-      console.log("POST /api/login - Body:", req.body);
-      
       // Check if email exists in the request body
       if (!req.body.email) {
         return res.status(400).json({ message: "Email is required" });
@@ -270,37 +231,28 @@ export function setupAuth(app: Express) {
       // Validate login data (simplified for email-only auth)
       const parsedData = loginUserSchema.safeParse({
         email: req.body.email,
-        password: req.body.password || '' // Default to empty string for Passport
+        password: req.body.password || ''
       });
       
       if (!parsedData.success) {
-        console.log("POST /api/login - Validation failed:", parsedData.error.format());
         return res.status(400).json({ message: "Invalid login data", errors: parsedData.error.format() });
       }
 
-      console.log("POST /api/login - Validation succeeded. Parsed data:", parsedData.data);
-      
       passport.authenticate("local", (err: any, user: SelectUser | false, info: any) => {
-        console.log("POST /api/auth - Passport auth result:", { err, user: user ? user.email : null, info });
-        
         if (err) return next(err);
         if (!user) return res.status(401).json({ message: "Invalid email or password" });
 
         req.login(user, (err: any) => {
           if (err) {
-            console.log("POST /api/auth - Login error:", err);
+            console.error("POST /api/auth - Login error:", sanitizeLogObject(err));
             return next(err);
           }
           
-          console.log("POST /api/auth - Login successful for user:", user.email);
-          
-          // Remove password from response
-          const { password, ...userWithoutPassword } = user;
-          res.status(200).json(userWithoutPassword);
+          res.status(200).json(user);
         });
       })(req, res, next);
     } catch (error) {
-      console.log("POST /api/login - Exception:", error);
+      console.error("POST /api/login - Exception:", sanitizeLogObject(error));
       next(error);
     }
   };
@@ -328,14 +280,14 @@ export function setupAuth(app: Express) {
         return res.status(400).json({ message: "Current password and new password are required" });
       }
       
-      // Get user from database
-      const user = await storage.getUser(req.user!.id);
-      if (!user || !user.password) {
+      // Get user credentials from database
+      const userCredentials = await storage.getUserAuthCredentialsById(req.user!.id);
+      if (!userCredentials || !userCredentials.password) {
         return res.status(400).json({ message: "User account error" });
       }
       
       // Verify current password
-      const isCurrentPasswordValid = await comparePasswords(currentPassword, user.password);
+      const isCurrentPasswordValid = await comparePasswords(currentPassword, userCredentials.password);
       if (!isCurrentPasswordValid) {
         return res.status(400).json({ message: "Current password is incorrect" });
       }
@@ -343,22 +295,18 @@ export function setupAuth(app: Express) {
       // Hash new password
       const hashedPassword = await hashPassword(newPassword);
       
-      // Update password in database
-      await storage.updateUserPassword(user.id, hashedPassword);
+      // Update password in database via dedicated write primitive
+      await storage.updateUserPassword(req.user!.id, hashedPassword);
       
-      console.log(`Password changed successfully for user: ${user.email}`);
+      auditLog("AUTH_PASSWORD_CHANGE_SUCCESS", { userId: req.user!.id });
       res.status(200).json({ message: "Password changed successfully" });
     } catch (error) {
-      console.error("Password change error:", error);
+      console.error("Password change error:", sanitizeLogObject(error));
       next(error);
     }
   });
 
   app.get("/api/user", async (req, res) => {
-    console.log("GET /api/user - Authentication status:", req.isAuthenticated());
-    console.log("GET /api/user - Session:", req.session);
-    console.log("GET /api/user - User:", req.user);
-    
     if (!req.isAuthenticated()) {
       return res.sendStatus(401);
     }
@@ -372,8 +320,6 @@ export function setupAuth(app: Express) {
       // Convert PostgreSQL boolean to JS boolean
       const isAdmin = dbValue === true || dbValue === 't' || dbValue === 'true';
       
-      console.log(`GET /api/user - Direct DB admin check: ${isAdmin} (${typeof isAdmin})`);
-      
       // Add admin status in both formats
       const userData = {
         ...req.user,
@@ -381,11 +327,9 @@ export function setupAuth(app: Express) {
         is_admin: isAdmin
       };
       
-      // Remove password from response
-      const { password, ...userWithoutPassword } = userData as SelectUser;
-      res.json(userWithoutPassword);
+      res.json(userData);
     } catch (error) {
-      console.error("Error in /api/user endpoint:", error);
+      console.error("Error in /api/user endpoint:", sanitizeLogObject(error));
       res.status(500).json({ message: "Server error fetching user data" });
     }
   });
@@ -454,14 +398,15 @@ export function setupAuth(app: Express) {
         const { sendPasswordResetEmail } = await import('./email');
         await sendPasswordResetEmail(user.email, user.username || 'User', temporaryPassword);
       } catch (error) {
-        console.error('Failed to send password reset email:', error);
+        console.error('Failed to send password reset email:', sanitizeLogObject(error));
         // Use fallback mechanism for logging reset details
         const { logPasswordResetDetails } = await import('./email-fallback');
-        logPasswordResetDetails(user.email, user.username || 'User', temporaryPassword);
+        logPasswordResetDetails(user.email, user.username || 'User');
       }
       
       res.status(200).json({ message: "If your email exists, a password reset link will be sent" });
     } catch (error) {
+      console.error("Password reset error:", sanitizeLogObject(error));
       next(error);
     }
   });

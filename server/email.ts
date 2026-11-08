@@ -479,7 +479,7 @@ export async function sendRegistrationEmail(
       return;
     } catch (sendError: any) {
       console.error('Error sending registration email:', sendError?.message || sendError);
-      logRegistrationDetails(to, username, password);
+      logRegistrationDetails(to, username);
       throw new Error('Failed to send registration email');
     }
   } catch (error: any) {
@@ -530,7 +530,7 @@ export async function sendPasswordResetEmail(
       return;
     } catch (sendError: any) {
       console.error('Error sending password reset email:', sendError?.message || sendError);
-      logPasswordResetDetails(to, username, temporaryPassword);
+      logPasswordResetDetails(to, username);
       throw new Error('Failed to send password reset email');
     }
   } catch (error: any) {
